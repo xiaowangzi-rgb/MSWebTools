@@ -4,6 +4,7 @@ import { ScanSearch } from 'lucide-react';
 import type { ToolMeta } from '@/tools/types';
 import { buildSupportedSet, checkText, type Missing } from './core';
 import { blockNameOf } from './blocks';
+import { getFileKind, getUnsupportedReason, extractXlsxText } from './xlsx';
 
 export const meta: ToolMeta = {
   slug: 'font-coverage',
@@ -80,6 +81,18 @@ async function readFileAsText(file: File): Promise<string> {
   });
 }
 
+/** 根据扩展名路由：.xlsx 走解压+XML 提取，其余二进制格式直接报错，纯文本按 UTF-8 读。 */
+async function readFileContent(file: File): Promise<string> {
+  const kind = getFileKind(file.name);
+  if (kind === 'unsupported') {
+    throw new Error(getUnsupportedReason(file.name));
+  }
+  if (kind === 'xlsx') {
+    return extractXlsxText(file);
+  }
+  return readFileAsText(file);
+}
+
 export default function FontCoverageTool() {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -134,7 +147,7 @@ export default function FontCoverageTool() {
       const next: FileResult[] = [];
       for (const f of list) {
         try {
-          const text = await readFileAsText(f);
+          const text = await readFileContent(f);
           const { missing, total, skipped } = checkText(text, supported, f.name);
           next.push({ name: f.name, size: f.size, text, missing, total, skipped });
         } catch (err: unknown) {
@@ -296,7 +309,7 @@ export default function FontCoverageTool() {
               </em>
             </p>
             <p className="mt-4 text-[12.5px] text-ink/60 dark:text-bone/50">
-              UTF-8（含 BOM） · 控制字符 / emoji 自动跳过 · 支持多选
+              UTF-8（含 BOM） · <span className="num">.xlsx</span> 自动提取 · 控制字符 / emoji 跳过 · 支持多选
             </p>
           </div>
 
