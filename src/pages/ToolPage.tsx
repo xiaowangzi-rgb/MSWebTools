@@ -34,7 +34,7 @@ export default function ToolPage() {
       </nav>
 
       {/* Spread-style article header */}
-      <header className="grid grid-cols-1 gap-8 pt-10 sm:grid-cols-12 sm:gap-6 sm:pt-16">
+      <header className="grid grid-cols-1 gap-8 pt-10 sm:grid-cols-12 sm:items-center sm:gap-6 sm:pt-16">
         <aside className="sm:col-span-3 lg:col-span-2 sm:border-r sm:border-ink/30 sm:dark:border-bone/20 sm:pr-5">
           <div className="relative inline-flex h-14 w-14 items-center justify-center border border-ink dark:border-bone animate-rise">
             <Icon size={22} strokeWidth={1.5} />
@@ -74,9 +74,6 @@ export default function ToolPage() {
           <h1 className="mt-2 font-display text-[clamp(2.5rem,7vw,5.5rem)] font-medium leading-[0.95] tracking-tightest animate-ink-in delay-1 text-balance">
             {meta.name}
           </h1>
-          <p className="mt-6 max-w-3xl font-display text-xl leading-[1.4] text-ink/85 dark:text-bone/80 sm:text-2xl animate-rise delay-3 text-pretty">
-            {meta.description}
-          </p>
         </div>
       </header>
 

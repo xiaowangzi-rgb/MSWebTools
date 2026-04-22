@@ -224,15 +224,16 @@ def ttf_codepoints(path: Path) -> tuple[set[int], int]:
         font.close()
 
 
-def scan_all_fonts(project_root: Path) -> list[dict]:
-    """Scan PRIMARY_FONT_DIRS for every .ttf/.otf and emit its raw cmap coverage.
+def scan_all_fonts(project_root: Path, restrict_to: set[Path]) -> list[dict]:
+    """Scan PRIMARY_FONT_DIRS for .ttf/.otf files referenced by any FontAsset.
 
-    This is independent of which FontAssets reference the file — useful when a ttf
-    exists in the project but is only consumed by Static FontAssets (which don't
-    record a sourceTtf and don't need cmap info to bake).
+    Only emits TTFs whose resolved path appears in ``restrict_to`` — i.e. at least
+    one FontAsset in the project links to it via m_SourceFontFileGUID. Orphan
+    TTFs sitting in the Font folder but wired to nothing are skipped.
     """
     fonts: list[dict] = []
     seen: set[Path] = set()
+    skipped = 0
     for sub in PRIMARY_FONT_DIRS:
         root = project_root / sub
         if not root.is_dir():
@@ -245,6 +246,10 @@ def scan_all_fonts(project_root: Path) -> list[dict]:
             if p in seen:
                 continue
             seen.add(p)
+            if p not in restrict_to:
+                skipped += 1
+                print(f"  [T] {p.name:40s}: skipped (not referenced by any FontAsset)")
+                continue
             try:
                 cps, placeholder = ttf_codepoints(p)
             except Exception as e:
@@ -259,6 +264,8 @@ def scan_all_fonts(project_root: Path) -> list[dict]:
                 "placeholdersFiltered": placeholder,
             })
             print(f"  [T] {p.name:40s}: {len(cps):>6,} cp  (-{placeholder} placeholder)")
+    if skipped:
+        print(f"  (skipped {skipped} unreferenced ttf/otf file(s))")
     return fonts
 
 
@@ -319,10 +326,21 @@ def main() -> int:
     full_scan: dict[str, Path] | None = None
 
     entries: list[dict] = []
+    used_ttf_paths: set[Path] = set()
     for info in assets:
         mode_label = MODE_LABEL.get(info.mode, f"unknown({info.mode})")
         source_ttf: str | None = None
         placeholder = 0
+
+        # Resolve source TTF for any asset (static or dynamic) so orphan ttf/otf
+        # files — those not wired to any FontAsset — can be dropped below.
+        asset_ttf_path: Path | None = None
+        if info.source_guid:
+            asset_ttf_path, full_scan = resolve_ttf(
+                info.source_guid, primary_index, args.project, full_scan,
+            )
+            if asset_ttf_path is not None:
+                used_ttf_paths.add(asset_ttf_path)
 
         if info.mode == 0:
             # Static — only baked characters are renderable
@@ -332,18 +350,13 @@ def main() -> int:
             if not info.source_guid:
                 print(f"  [warn] {info.name}: mode={mode_label} but no source GUID, using characterTable only")
                 cps = info.characters
+            elif asset_ttf_path is None:
+                print(f"  [warn] {info.name}: cannot resolve GUID {info.source_guid}, using characterTable only")
+                cps = info.characters
             else:
-                ttf_path, full_scan = resolve_ttf(
-                    info.source_guid, primary_index, args.project, full_scan,
-                )
-                if ttf_path is None:
-                    print(f"  [warn] {info.name}: cannot resolve GUID {info.source_guid}, using characterTable only")
-                    cps = info.characters
-                    placeholder = 0
-                else:
-                    source_ttf = ttf_path.name
-                    ttf_cps, placeholder = ttf_codepoints(ttf_path)
-                    cps = ttf_cps | info.characters
+                source_ttf = asset_ttf_path.name
+                ttf_cps, placeholder = ttf_codepoints(asset_ttf_path)
+                cps = ttf_cps | info.characters
 
         rel_path = str(info.path.relative_to(args.project))
         entry = {
@@ -365,8 +378,8 @@ def main() -> int:
                 suffix += f"  (-{placeholder} placeholder)"
         print(f"  [{tag}] {info.name:40s}: {len(cps):>6,} cp{suffix}")
 
-    print("\nScanning source TTF/OTF files under primary font dirs…")
-    source_ttfs = scan_all_fonts(args.project)
+    print("\nScanning source TTF/OTF files referenced by FontAssets…")
+    source_ttfs = scan_all_fonts(args.project, used_ttf_paths)
 
     data = {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),

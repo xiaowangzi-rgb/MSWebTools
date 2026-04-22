@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
-import { ScanSearch } from 'lucide-react';
+import { Plus, ScanSearch, X } from 'lucide-react';
 import type { ToolMeta } from '@/tools/types';
 import { buildSupportedSet, checkText, type Missing } from './core';
 import { blockNameOf } from './blocks';
 import { getFileKind, getUnsupportedReason, extractXlsxText } from './xlsx';
+import { parseTtfFile } from './parseTtf';
 
 export const meta: ToolMeta = {
   slug: 'font-coverage',
@@ -145,6 +146,46 @@ async function readFileContent(file: File): Promise<string> {
   return readFileAsText(file);
 }
 
+const USER_TTF_STORAGE_KEY = 'font-coverage:userTtfs/v1';
+
+type UserTtf = {
+  name: string;
+  codepoints: number;
+  ranges: [number, number][];
+};
+
+function uniqueUserTtfName(
+  fileName: string,
+  existing: Set<string>,
+  pending: { name: string }[],
+): string {
+  const base = `[自定义] ${fileName}`;
+  const taken = new Set<string>(existing);
+  for (const p of pending) taken.add(p.name);
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base} (${i})`)) i++;
+  return `${base} (${i})`;
+}
+
+function loadUserTtfs(): UserTtf[] {
+  try {
+    const raw = localStorage.getItem(USER_TTF_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (t: unknown): t is UserTtf =>
+        !!t &&
+        typeof (t as UserTtf).name === 'string' &&
+        typeof (t as UserTtf).codepoints === 'number' &&
+        Array.isArray((t as UserTtf).ranges),
+    );
+  } catch {
+    return [];
+  }
+}
+
 export default function FontCoverageTool() {
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -152,6 +193,8 @@ export default function FontCoverageTool() {
   const [pasted, setPasted] = useState('');
   const [isDragging, setDragging] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [userTtfs, setUserTtfs] = useState<UserTtf[]>(() => loadUserTtfs());
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -160,16 +203,63 @@ export default function FontCoverageTool() {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then((d: Dataset) => {
         setDataset(d);
-        setSelected(new Set(d.fontAssets.map((a) => a.name)));
+        setSelected((prev) => {
+          // Preserve any user-TTF selections made before the dataset loaded.
+          const next = new Set(prev);
+          for (const t of deriveTtfEntries(d)) next.add(t.name);
+          return next;
+        });
       })
       .catch((e: unknown) => {
         setLoadError(e instanceof Error ? e.message : String(e));
       });
   }, []);
 
-  const ttfEntries = useMemo(
+  // Default-select every user TTF on first appearance so uploads light up immediately.
+  useEffect(() => {
+    if (userTtfs.length === 0) return;
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const t of userTtfs) {
+        if (!next.has(t.name)) {
+          next.add(t.name);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [userTtfs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(USER_TTF_STORAGE_KEY, JSON.stringify(userTtfs));
+    } catch {
+      // Quota/incognito — silently ignore, uploads remain in-memory for the session.
+    }
+  }, [userTtfs]);
+
+  const userTtfEntries = useMemo<FontAssetEntry[]>(
+    () =>
+      userTtfs.map((t) => ({
+        name: t.name,
+        file: '(上传)',
+        mode: 'ttf' as FontAssetMode,
+        sourceTtf: null,
+        codepoints: t.codepoints,
+        ranges: t.ranges,
+      })),
+    [userTtfs],
+  );
+
+  const datasetTtfEntries = useMemo(
     () => (dataset ? deriveTtfEntries(dataset) : []),
     [dataset],
+  );
+
+  const ttfEntries = useMemo(
+    () => [...datasetTtfEntries, ...userTtfEntries],
+    [datasetTtfEntries, userTtfEntries],
   );
 
   const allAssets = useMemo(
@@ -283,17 +373,71 @@ export default function FontCoverageTool() {
     });
   }
 
-  function selectAll() {
-    if (!dataset) return;
-    setSelected(new Set(allAssets.map((a) => a.name)));
+  function toggleGroup(names: string[]) {
+    if (names.length === 0) return;
+    setSelected((prev) => {
+      const allIn = names.every((n) => prev.has(n));
+      const next = new Set(prev);
+      if (allIn) {
+        for (const n of names) next.delete(n);
+      } else {
+        for (const n of names) next.add(n);
+      }
+      return next;
+    });
   }
-  function selectNone() {
-    setSelected(new Set());
-  }
-  function selectOnly(predicate: (a: FontAssetEntry) => boolean) {
-    if (!dataset) return;
-    setSelected(new Set(allAssets.filter(predicate).map((a) => a.name)));
-  }
+
+  const existingTtfNames = useMemo(
+    () => new Set(ttfEntries.map((t) => t.name)),
+    [ttfEntries],
+  );
+
+  const addUserTtfs = useCallback(
+    async (files: FileList | File[]) => {
+      setUploadError(null);
+      const list = Array.from(files);
+      const added: UserTtf[] = [];
+      const errors: string[] = [];
+      for (const f of list) {
+        const ext = f.name.toLowerCase().split('.').pop();
+        if (ext !== 'ttf' && ext !== 'otf') {
+          errors.push(`${f.name}: 只接受 .ttf / .otf`);
+          continue;
+        }
+        try {
+          const { codepoints, ranges } = await parseTtfFile(f);
+          const uniqueName = uniqueUserTtfName(f.name, existingTtfNames, added);
+          added.push({ name: uniqueName, codepoints, ranges });
+        } catch (err: unknown) {
+          errors.push(
+            `${f.name}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      if (added.length > 0) {
+        setUserTtfs((prev) => [...prev, ...added]);
+      }
+      if (errors.length > 0) {
+        setUploadError(errors.join('\n'));
+      }
+    },
+    [existingTtfNames],
+  );
+
+  const removeUserTtf = useCallback((name: string) => {
+    setUserTtfs((prev) => prev.filter((t) => t.name !== name));
+    setSelected((prev) => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+  }, []);
+
+  const userTtfNames = useMemo(
+    () => new Set(userTtfs.map((t) => t.name)),
+    [userTtfs],
+  );
 
   return (
     <div className="grid grid-cols-1 gap-8 sm:grid-cols-12 sm:gap-6">
@@ -315,9 +459,12 @@ export default function FontCoverageTool() {
             selected={selected}
             supportedSize={supported?.size ?? 0}
             onToggle={toggleAsset}
-            onSelectAll={selectAll}
-            onSelectNone={selectNone}
-            onSelectOnly={selectOnly}
+            onToggleGroup={toggleGroup}
+            userTtfNames={userTtfNames}
+            onAddUserTtf={addUserTtfs}
+            onRemoveUserTtf={removeUserTtf}
+            uploadError={uploadError}
+            onDismissUploadError={() => setUploadError(null)}
           />
         </div>
       </aside>
@@ -454,9 +601,12 @@ function AssetPicker({
   selected,
   supportedSize,
   onToggle,
-  onSelectAll,
-  onSelectNone,
-  onSelectOnly,
+  onToggleGroup,
+  userTtfNames,
+  onAddUserTtf,
+  onRemoveUserTtf,
+  uploadError,
+  onDismissUploadError,
 }: {
   dataset: Dataset | null;
   ttfEntries: FontAssetEntry[];
@@ -464,9 +614,12 @@ function AssetPicker({
   selected: Set<string>;
   supportedSize: number;
   onToggle: (name: string) => void;
-  onSelectAll: () => void;
-  onSelectNone: () => void;
-  onSelectOnly: (pred: (a: FontAssetEntry) => boolean) => void;
+  onToggleGroup: (names: string[]) => void;
+  userTtfNames: Set<string>;
+  onAddUserTtf: (files: FileList | File[]) => void;
+  onRemoveUserTtf: (name: string) => void;
+  uploadError: string | null;
+  onDismissUploadError: () => void;
 }) {
   if (loadError) {
     return (
@@ -500,65 +653,243 @@ function AssetPicker({
   const totalAll = total + ttfTotal;
   const selectedAll = assetSelected + ttfSelected;
 
+  const staticAssets = assets.filter((a) => a.mode === 'static');
+  const dynamicAssets = assets.filter(
+    (a) => a.mode === 'dynamic' || a.mode === 'dynamic-os',
+  );
+  const otherAssets = assets.filter(
+    (a) =>
+      a.mode !== 'static' && a.mode !== 'dynamic' && a.mode !== 'dynamic-os',
+  );
+  const countSelected = (list: FontAssetEntry[]) =>
+    list.reduce((n, a) => n + (selected.has(a.name) ? 1 : 0), 0);
+
   return (
     <div className="space-y-4 text-sm">
       <dl className="space-y-2.5">
-        <StatRow label="已选 FontAsset" value={`${assetSelected} / ${total}`} strong />
         {ttfTotal > 0 && (
-          <StatRow label="已选 TTF" value={`${ttfSelected} / ${ttfTotal}`} />
+          <StatRow label="已选 TTF" value={`${ttfSelected} / ${ttfTotal}`} strong />
         )}
+        <StatRow
+          label="已选 FontAsset"
+          value={`${assetSelected} / ${total}`}
+          strong={ttfTotal === 0}
+        />
         <StatRow label="覆盖码点（并集）" value={supportedSize.toLocaleString()} />
         <StatRow label="更新于" value={when} small />
       </dl>
 
-      <div className="flex flex-wrap gap-2">
-        <PickerBtn active={selectedAll === totalAll} onClick={onSelectAll}>全选</PickerBtn>
-        <PickerBtn active={selectedAll === 0} onClick={onSelectNone}>全不选</PickerBtn>
-        <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'dynamic' || a.mode === 'dynamic-os')}>
-          仅 Dynamic
-        </PickerBtn>
-        <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'static')}>
-          仅 Static
-        </PickerBtn>
+      <div className="flex flex-wrap gap-x-4 gap-y-2">
+        <GroupToggle
+          label="全部"
+          total={totalAll}
+          selectedCount={selectedAll}
+          onToggle={() =>
+            onToggleGroup([
+              ...ttfEntries.map((t) => t.name),
+              ...assets.map((a) => a.name),
+            ])
+          }
+        />
         {ttfTotal > 0 && (
-          <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'ttf')}>
-            仅 TTF
-          </PickerBtn>
+          <GroupToggle
+            label="TTF"
+            total={ttfTotal}
+            selectedCount={ttfSelected}
+            onToggle={() => onToggleGroup(ttfEntries.map((t) => t.name))}
+          />
+        )}
+        {staticAssets.length > 0 && (
+          <GroupToggle
+            label="Static"
+            total={staticAssets.length}
+            selectedCount={countSelected(staticAssets)}
+            onToggle={() => onToggleGroup(staticAssets.map((a) => a.name))}
+          />
+        )}
+        {dynamicAssets.length > 0 && (
+          <GroupToggle
+            label="Dynamic"
+            total={dynamicAssets.length}
+            selectedCount={countSelected(dynamicAssets)}
+            onToggle={() => onToggleGroup(dynamicAssets.map((a) => a.name))}
+          />
         )}
       </div>
 
-      <ul className="space-y-1.5 border-t border-ink/15 pt-3 dark:border-bone/10">
-        {assets.map((a) => (
-          <AssetRow
-            key={a.name}
-            asset={a}
-            checked={selected.has(a.name)}
-            onToggle={() => onToggle(a.name)}
-          />
-        ))}
-      </ul>
+      {uploadError && (
+        <div className="flex items-start gap-2 border border-vermillion/60 bg-vermillion/5 p-2.5 text-[11.5px] dark:border-amber/60 dark:bg-amber/5">
+          <p className="flex-1 whitespace-pre-line text-vermillion/90 dark:text-amber/85">
+            {uploadError}
+          </p>
+          <button
+            onClick={onDismissUploadError}
+            className="label shrink-0 text-vermillion/70 hover:text-vermillion dark:text-amber/70 dark:hover:text-amber"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
-      {ttfTotal > 0 && (
-        <>
-          <div className="mt-5 flex items-baseline justify-between border-t border-ink/15 pt-3 dark:border-bone/10">
-            <p className="label text-ink/55 dark:text-bone/45">源 TTF 文件</p>
-            <p className="num text-[10.5px] text-ink/40 dark:text-bone/35">
-              默认不选 · 空字形已过滤
-            </p>
-          </div>
-          <ul className="space-y-1.5">
-            {ttfEntries.map((t) => (
+      <div className="border-t border-ink/15 pt-1 dark:border-bone/10">
+        <AssetGroup
+          defaultOpen
+          label="源 TTF 文件"
+          hint="空字形已过滤"
+          total={ttfTotal}
+          selectedCount={ttfSelected}
+          action={<AddTtfButton onPick={onAddUserTtf} />}
+        >
+          {ttfEntries.length === 0 ? (
+            <li className="label px-1 py-2 text-[11px] text-ink/45 dark:text-bone/35">
+              还没有 TTF —— 点右上角 + 添加一个本地 ttf/otf。
+            </li>
+          ) : (
+            ttfEntries.map((t) => (
               <AssetRow
                 key={t.name}
                 asset={t}
                 checked={selected.has(t.name)}
                 onToggle={() => onToggle(t.name)}
+                onRemove={
+                  userTtfNames.has(t.name)
+                    ? () => onRemoveUserTtf(t.name)
+                    : undefined
+                }
+              />
+            ))
+          )}
+        </AssetGroup>
+        {staticAssets.length > 0 && (
+          <AssetGroup
+            label="Static"
+            total={staticAssets.length}
+            selectedCount={countSelected(staticAssets)}
+          >
+            {staticAssets.map((a) => (
+              <AssetRow
+                key={a.name}
+                asset={a}
+                checked={selected.has(a.name)}
+                onToggle={() => onToggle(a.name)}
               />
             ))}
-          </ul>
-        </>
-      )}
+          </AssetGroup>
+        )}
+        {dynamicAssets.length > 0 && (
+          <AssetGroup
+            label="Dynamic"
+            total={dynamicAssets.length}
+            selectedCount={countSelected(dynamicAssets)}
+          >
+            {dynamicAssets.map((a) => (
+              <AssetRow
+                key={a.name}
+                asset={a}
+                checked={selected.has(a.name)}
+                onToggle={() => onToggle(a.name)}
+              />
+            ))}
+          </AssetGroup>
+        )}
+        {otherAssets.length > 0 && (
+          <AssetGroup
+            label="其他"
+            total={otherAssets.length}
+            selectedCount={countSelected(otherAssets)}
+          >
+            {otherAssets.map((a) => (
+              <AssetRow
+                key={a.name}
+                asset={a}
+                checked={selected.has(a.name)}
+                onToggle={() => onToggle(a.name)}
+              />
+            ))}
+          </AssetGroup>
+        )}
+      </div>
     </div>
+  );
+}
+
+function AssetGroup({
+  label,
+  hint,
+  total,
+  selectedCount,
+  children,
+  defaultOpen,
+  action,
+}: {
+  label: string;
+  hint?: string;
+  total: number;
+  selectedCount: number;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  action?: React.ReactNode;
+}) {
+  return (
+    <details
+      open={defaultOpen}
+      className="group border-b border-ink/10 last:border-b-0 dark:border-bone/10"
+    >
+      <summary className="flex cursor-pointer items-center gap-3 py-2.5 marker:content-['']">
+        <span className="inline-block w-3 text-vermillion transition-transform group-open:rotate-90 dark:text-amber">
+          ›
+        </span>
+        <span className="label flex-1 text-ink/70 dark:text-bone/60">{label}</span>
+        {hint && (
+          <span className="num text-[10.5px] text-ink/40 dark:text-bone/35">
+            {hint}
+          </span>
+        )}
+        <span className="num shrink-0 text-[11px] text-ink/55 dark:text-bone/45 tabular-nums">
+          {selectedCount} / {total}
+        </span>
+        {action}
+      </summary>
+      <ul className="space-y-1.5 pb-3">{children}</ul>
+    </details>
+  );
+}
+
+function AddTtfButton({
+  onPick,
+}: {
+  onPick: (files: FileList | File[]) => void;
+}) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        title="上传本地 ttf/otf"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          ref.current?.click();
+        }}
+        className="label inline-flex h-5 w-5 shrink-0 items-center justify-center border border-ink/40 text-ink/60 transition hover:border-vermillion hover:text-vermillion dark:border-bone/30 dark:text-bone/50 dark:hover:border-amber dark:hover:text-amber"
+      >
+        <Plus size={12} strokeWidth={1.75} />
+      </button>
+      <input
+        ref={ref}
+        type="file"
+        accept=".ttf,.otf,font/ttf,font/otf,application/x-font-ttf,application/x-font-otf"
+        multiple
+        className="sr-only"
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            onPick(e.target.files);
+          }
+          e.target.value = '';
+        }}
+      />
+    </>
   );
 }
 
@@ -566,10 +897,12 @@ function AssetRow({
   asset,
   checked,
   onToggle,
+  onRemove,
 }: {
   asset: FontAssetEntry;
   checked: boolean;
   onToggle: () => void;
+  onRemove?: () => void;
 }) {
   const isDyn = asset.mode === 'dynamic' || asset.mode === 'dynamic-os';
   return (
@@ -595,6 +928,20 @@ function AssetRow({
         <span className="num shrink-0 text-[11px] text-ink/55 dark:text-bone/45">
           {asset.codepoints.toLocaleString()}
         </span>
+        {onRemove && (
+          <button
+            type="button"
+            title="移除"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRemove();
+            }}
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-ink/40 transition hover:text-vermillion dark:text-bone/35 dark:hover:text-amber"
+          >
+            <X size={11} strokeWidth={2} />
+          </button>
+        )}
       </label>
       {isDyn && asset.sourceTtf && (
         <p className="mt-0.5 ml-6 num text-[10.5px] text-ink/45 dark:text-bone/35">
@@ -636,27 +983,37 @@ function ModeBadge({ mode }: { mode: FontAssetMode }) {
   );
 }
 
-function PickerBtn({
-  active,
-  children,
-  onClick,
+function GroupToggle({
+  label,
+  total,
+  selectedCount,
+  onToggle,
 }: {
-  active?: boolean;
-  children: React.ReactNode;
-  onClick: () => void;
+  label: string;
+  total: number;
+  selectedCount: number;
+  onToggle: () => void;
 }) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const allOn = total > 0 && selectedCount === total;
+  const partial = selectedCount > 0 && selectedCount < total;
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = partial;
+  }, [partial]);
   return (
-    <button
-      onClick={onClick}
-      className={[
-        'label border px-2 py-1 text-[10.5px] transition',
-        active
-          ? 'border-ink bg-ink text-paper dark:border-bone dark:bg-bone dark:text-graphite'
-          : 'border-ink/40 text-ink/70 hover:border-ink hover:text-ink dark:border-bone/30 dark:text-bone/60 dark:hover:border-bone dark:hover:text-bone',
-      ].join(' ')}
-    >
-      {children}
-    </button>
+    <label className="label inline-flex cursor-pointer select-none items-center gap-2 text-[10.5px] text-ink/70 transition hover:text-ink dark:text-bone/60 dark:hover:text-bone">
+      <input
+        ref={ref}
+        type="checkbox"
+        checked={allOn}
+        onChange={onToggle}
+        className="h-3.5 w-3.5 accent-vermillion dark:accent-amber"
+      />
+      <span>{label}</span>
+      <span className="num tabular-nums text-ink/45 dark:text-bone/35">
+        {selectedCount}/{total}
+      </span>
+    </label>
   );
 }
 
