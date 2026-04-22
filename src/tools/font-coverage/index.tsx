@@ -205,12 +205,26 @@ export default function FontCoverageTool() {
         setDataset(d);
         setSelected((prev) => {
           // Preserve any user-TTF selections made before the dataset loaded,
-          // plus default-select every Static FontAsset (project ships baked).
+          // plus default-select the source TTFs referenced by primary Dynamic
+          // FontAssets (i.e. mode=dynamic/dynamic-os, excluding Fallback slots).
+          // Static/Dynamic FontAsset rows start unchecked — the TTF is the real
+          // runtime coverage.
           const next = new Set(prev);
+          const defaultTtfFiles = new Set<string>();
           for (const a of d.fontAssets) {
-            if (a.mode === 'static') next.add(a.name);
+            if (
+              (a.mode === 'dynamic' || a.mode === 'dynamic-os') &&
+              a.sourceTtf &&
+              !/fallback/i.test(a.name)
+            ) {
+              defaultTtfFiles.add(a.sourceTtf);
+            }
           }
-          for (const t of deriveTtfEntries(d)) next.add(t.name);
+          for (const t of deriveTtfEntries(d)) {
+            // t.name is `[TTF] <file>`; match against the collected filenames.
+            const base = t.name.replace(/^\[TTF\] /, '');
+            if (defaultTtfFiles.has(base)) next.add(t.name);
+          }
           return next;
         });
       })
