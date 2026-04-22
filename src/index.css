@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --paper: 242 236 222;
+    --ink: 22 22 26;
+    --rule: 22 22 26;
+    --rule-soft: 22 22 26 / 0.15;
+    --grid-line: 22 22 26 / 0.055;
+    --vermillion: 217 74 42;
+  }
+  .dark {
+    --paper: 14 15 18;
+    --ink: 237 231 215;
+    --rule: 237 231 215;
+    --rule-soft: 237 231 215 / 0.2;
+    --grid-line: 237 231 215 / 0.055;
+    --vermillion: 232 177 74;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-family: 'Archivo', sans-serif;
+    font-feature-settings: 'ss01', 'cv11';
+  }
+
+  body {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 400;
+    /* Paper texture: dot grid + faint warm gradient */
+    background-color: rgb(var(--paper));
+    background-image:
+      radial-gradient(circle at 1px 1px, rgb(var(--grid-line)) 1px, transparent 0);
+    background-size: 22px 22px;
+    background-attachment: fixed;
+  }
+
+  /* Selection — inverted ink */
+  ::selection {
+    background: rgb(var(--ink));
+    color: rgb(var(--paper));
+  }
+
+  :focus-visible {
+    outline: 2px dashed rgb(var(--vermillion));
+    outline-offset: 3px;
+    border-radius: 1px;
+  }
+
+  /* Display family utility */
+  .font-display {
+    font-family: 'Fraunces', ui-serif, Georgia, serif;
+    font-variation-settings: 'SOFT' 30, 'opsz' 120;
+  }
+}
+
+@layer components {
+  /* Thin rule line, typographic */
+  .rule {
+    height: 1px;
+    background: rgb(var(--rule));
+    opacity: 0.9;
+  }
+
+  /* Double rule — editorial divider */
+  .rule-double {
+    background:
+      linear-gradient(to bottom, rgb(var(--rule)) 0 1px, transparent 1px 3px, rgb(var(--rule)) 3px 4px);
+    height: 4px;
+  }
+
+  /* Registration / tick marks at corners */
+  .tick-corner {
+    position: relative;
+  }
+  .tick-corner::before,
+  .tick-corner::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 1px solid rgb(var(--rule));
+    border-radius: 0;
+    pointer-events: none;
+  }
+  .tick-corner::before {
+    top: 0;
+    left: 0;
+    border-right: 0;
+    border-bottom: 0;
+  }
+  .tick-corner::after {
+    bottom: 0;
+    right: 0;
+    border-left: 0;
+    border-top: 0;
+  }
+
+  /* Catalog entry card base */
+  .catalog-entry {
+    position: relative;
+    background: rgb(var(--paper));
+    border: 1px solid rgb(var(--rule));
+    transition:
+      transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 0.25s cubic-bezier(0.2, 0.8, 0.2, 1),
+      background-color 0.25s ease;
+  }
+  .catalog-entry:hover {
+    transform: translate(-3px, -3px);
+  }
+  .catalog-entry:hover {
+    box-shadow: 4px 4px 0 0 rgb(var(--rule));
+  }
+
+  /* Hatching pattern — for accent strips */
+  .hatch {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      rgb(var(--ink)) 0,
+      rgb(var(--ink)) 1px,
+      transparent 1px,
+      transparent 6px
+    );
+  }
+
+  /* Small-caps editorial label */
+  .label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+
+  /* Numerical index */
+  .num {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .delay-1 { animation-delay: 80ms; }
+  .delay-2 { animation-delay: 160ms; }
+  .delay-3 { animation-delay: 240ms; }
+  .delay-4 { animation-delay: 320ms; }
+  .delay-5 { animation-delay: 400ms; }
+  .delay-6 { animation-delay: 480ms; }
+
+  .text-balance { text-wrap: balance; }
+  .text-pretty  { text-wrap: pretty; }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgb(var(--grid-line)) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(var(--grid-line)) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+}
