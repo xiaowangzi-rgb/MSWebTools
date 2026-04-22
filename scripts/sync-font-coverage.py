@@ -224,6 +224,44 @@ def ttf_codepoints(path: Path) -> tuple[set[int], int]:
         font.close()
 
 
+def scan_all_fonts(project_root: Path) -> list[dict]:
+    """Scan PRIMARY_FONT_DIRS for every .ttf/.otf and emit its raw cmap coverage.
+
+    This is independent of which FontAssets reference the file — useful when a ttf
+    exists in the project but is only consumed by Static FontAssets (which don't
+    record a sourceTtf and don't need cmap info to bake).
+    """
+    fonts: list[dict] = []
+    seen: set[Path] = set()
+    for sub in PRIMARY_FONT_DIRS:
+        root = project_root / sub
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in (".ttf", ".otf"):
+                continue
+            if p in seen:
+                continue
+            seen.add(p)
+            try:
+                cps, placeholder = ttf_codepoints(p)
+            except Exception as e:
+                print(f"  [warn] cannot read {p.relative_to(project_root)}: {e}", file=sys.stderr)
+                continue
+            rel_path = str(p.relative_to(project_root))
+            fonts.append({
+                "name": p.name,
+                "file": rel_path,
+                "codepoints": len(cps),
+                "ranges": to_ranges(cps),
+                "placeholdersFiltered": placeholder,
+            })
+            print(f"  [T] {p.name:40s}: {len(cps):>6,} cp  (-{placeholder} placeholder)")
+    return fonts
+
+
 def to_ranges(codepoints: set[int]) -> list[list[int]]:
     if not codepoints:
         return []
@@ -327,11 +365,15 @@ def main() -> int:
                 suffix += f"  (-{placeholder} placeholder)"
         print(f"  [{tag}] {info.name:40s}: {len(cps):>6,} cp{suffix}")
 
+    print("\nScanning source TTF/OTF files under primary font dirs…")
+    source_ttfs = scan_all_fonts(args.project)
+
     data = {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project": str(args.project),
         "scanRoot": str(scan_root.relative_to(args.project)),
         "fontAssets": entries,
+        "sourceTtfs": source_ttfs,
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

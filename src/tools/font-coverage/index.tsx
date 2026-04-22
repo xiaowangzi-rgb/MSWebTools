@@ -16,7 +16,7 @@ export const meta: ToolMeta = {
   accent: 'from-teal-500 to-cyan-500',
 };
 
-type FontAssetMode = 'static' | 'dynamic' | 'dynamic-os' | string;
+type FontAssetMode = 'static' | 'dynamic' | 'dynamic-os' | 'ttf' | string;
 
 type FontAssetEntry = {
   name: string;
@@ -29,11 +29,21 @@ type FontAssetEntry = {
   placeholdersFiltered?: number;
 };
 
+type TtfSource = {
+  name: string;
+  file: string;
+  codepoints: number;
+  ranges: [number, number][];
+  placeholdersFiltered?: number;
+};
+
 type Dataset = {
   generatedAt: string;
   project: string;
   scanRoot: string;
   fontAssets: FontAssetEntry[];
+  /** Emitted by sync script ≥ v2 — raw TTF cmap coverage (空字形 filtered). */
+  sourceTtfs?: TtfSource[];
 };
 
 type FileResult = {
@@ -58,6 +68,7 @@ function modeShort(mode: FontAssetMode): string {
   if (mode === 'static') return 'S';
   if (mode === 'dynamic') return 'D';
   if (mode === 'dynamic-os') return 'DOS';
+  if (mode === 'ttf') return 'T';
   return '?';
 }
 
@@ -65,7 +76,48 @@ function modeLabel(mode: FontAssetMode): string {
   if (mode === 'static') return 'Static';
   if (mode === 'dynamic') return 'Dynamic';
   if (mode === 'dynamic-os') return 'Dynamic OS';
+  if (mode === 'ttf') return 'TTF 源文件';
   return mode;
+}
+
+/**
+ * 构造"源 TTF"虚拟条目。
+ *
+ * 优先：同步脚本（v2+）直接 emit 的 `sourceTtfs` —— 扫描 Font 目录下所有 ttf/otf，
+ * 不受 Dynamic 引用关系限制（Static-only 使用的 TTF 也会出现）。
+ *
+ * 回退：旧版本 JSON 只能从 Dynamic FontAsset 的 sourceTtf 字段反推。
+ */
+function deriveTtfEntries(dataset: Dataset): FontAssetEntry[] {
+  if (dataset.sourceTtfs && dataset.sourceTtfs.length > 0) {
+    return dataset.sourceTtfs.map((t) => ({
+      name: `[TTF] ${t.name}`,
+      file: t.file,
+      mode: 'ttf' as FontAssetMode,
+      sourceTtf: null,
+      codepoints: t.codepoints,
+      ranges: t.ranges,
+      placeholdersFiltered: t.placeholdersFiltered,
+    }));
+  }
+  // Fallback: only Dynamic-referenced TTFs are discoverable
+  const byTtf = new Map<string, FontAssetEntry>();
+  for (const a of dataset.fontAssets) {
+    if (a.mode === 'static') continue;
+    if (!a.sourceTtf) continue;
+    if (byTtf.has(a.sourceTtf)) continue;
+    const base = a.sourceTtf.split('/').pop() || a.sourceTtf;
+    byTtf.set(a.sourceTtf, {
+      name: `[TTF] ${base}`,
+      file: a.sourceTtf,
+      mode: 'ttf',
+      sourceTtf: null,
+      codepoints: a.codepoints,
+      ranges: a.ranges,
+      placeholdersFiltered: a.placeholdersFiltered,
+    });
+  }
+  return [...byTtf.values()];
 }
 
 async function readFileAsText(file: File): Promise<string> {
@@ -115,16 +167,26 @@ export default function FontCoverageTool() {
       });
   }, []);
 
+  const ttfEntries = useMemo(
+    () => (dataset ? deriveTtfEntries(dataset) : []),
+    [dataset],
+  );
+
+  const allAssets = useMemo(
+    () => (dataset ? [...dataset.fontAssets, ...ttfEntries] : []),
+    [dataset, ttfEntries],
+  );
+
   const supported = useMemo(() => {
     if (!dataset) return null;
     const ranges: [number, number][] = [];
-    for (const a of dataset.fontAssets) {
+    for (const a of allAssets) {
       if (selected.has(a.name)) {
         for (const r of a.ranges) ranges.push(r);
       }
     }
     return buildSupportedSet(ranges);
-  }, [dataset, selected]);
+  }, [dataset, allAssets, selected]);
 
   // When the supported set changes (selection toggled, dataset reloaded), re-run
   // the check over any already-collected results so the display stays consistent.
@@ -223,14 +285,14 @@ export default function FontCoverageTool() {
 
   function selectAll() {
     if (!dataset) return;
-    setSelected(new Set(dataset.fontAssets.map((a) => a.name)));
+    setSelected(new Set(allAssets.map((a) => a.name)));
   }
   function selectNone() {
     setSelected(new Set());
   }
   function selectOnly(predicate: (a: FontAssetEntry) => boolean) {
     if (!dataset) return;
-    setSelected(new Set(dataset.fontAssets.filter(predicate).map((a) => a.name)));
+    setSelected(new Set(allAssets.filter(predicate).map((a) => a.name)));
   }
 
   return (
@@ -248,6 +310,7 @@ export default function FontCoverageTool() {
         <div className="mt-5">
           <AssetPicker
             dataset={dataset}
+            ttfEntries={ttfEntries}
             loadError={loadError}
             selected={selected}
             supportedSize={supported?.size ?? 0}
@@ -386,6 +449,7 @@ export default function FontCoverageTool() {
 
 function AssetPicker({
   dataset,
+  ttfEntries,
   loadError,
   selected,
   supportedSize,
@@ -395,6 +459,7 @@ function AssetPicker({
   onSelectOnly,
 }: {
   dataset: Dataset | null;
+  ttfEntries: FontAssetEntry[];
   loadError: string | null;
   selected: Set<string>;
   supportedSize: number;
@@ -429,85 +494,141 @@ function AssetPicker({
   const when = new Date(dataset.generatedAt).toLocaleString('zh-CN', { hour12: false });
   const assets = dataset.fontAssets;
   const total = assets.length;
-  const count = selected.size;
+  const ttfTotal = ttfEntries.length;
+  const assetSelected = assets.reduce((n, a) => n + (selected.has(a.name) ? 1 : 0), 0);
+  const ttfSelected = ttfEntries.reduce((n, t) => n + (selected.has(t.name) ? 1 : 0), 0);
+  const totalAll = total + ttfTotal;
+  const selectedAll = assetSelected + ttfSelected;
 
   return (
     <div className="space-y-4 text-sm">
       <dl className="space-y-2.5">
-        <StatRow label="已选 FontAsset" value={`${count} / ${total}`} strong />
+        <StatRow label="已选 FontAsset" value={`${assetSelected} / ${total}`} strong />
+        {ttfTotal > 0 && (
+          <StatRow label="已选 TTF" value={`${ttfSelected} / ${ttfTotal}`} />
+        )}
         <StatRow label="覆盖码点（并集）" value={supportedSize.toLocaleString()} />
         <StatRow label="更新于" value={when} small />
       </dl>
 
       <div className="flex flex-wrap gap-2">
-        <PickerBtn active={count === total} onClick={onSelectAll}>全选</PickerBtn>
-        <PickerBtn active={count === 0} onClick={onSelectNone}>全不选</PickerBtn>
+        <PickerBtn active={selectedAll === totalAll} onClick={onSelectAll}>全选</PickerBtn>
+        <PickerBtn active={selectedAll === 0} onClick={onSelectNone}>全不选</PickerBtn>
         <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'dynamic' || a.mode === 'dynamic-os')}>
           仅 Dynamic
         </PickerBtn>
         <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'static')}>
           仅 Static
         </PickerBtn>
+        {ttfTotal > 0 && (
+          <PickerBtn onClick={() => onSelectOnly((a) => a.mode === 'ttf')}>
+            仅 TTF
+          </PickerBtn>
+        )}
       </div>
 
       <ul className="space-y-1.5 border-t border-ink/15 pt-3 dark:border-bone/10">
-        {assets.map((a) => {
-          const checked = selected.has(a.name);
-          const isDyn = a.mode !== 'static';
-          return (
-            <li key={a.name}>
-              <label
-                className={[
-                  'flex items-center gap-2.5 border border-ink/15 px-2.5 py-1.5 cursor-pointer transition',
-                  checked
-                    ? 'bg-ink/[0.04] dark:bg-bone/[0.04]'
-                    : 'opacity-60 hover:opacity-100',
-                  'dark:border-bone/10',
-                ].join(' ')}
-              >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => onToggle(a.name)}
-                  className="h-3.5 w-3.5 accent-vermillion dark:accent-amber"
-                />
-                <ModeBadge mode={a.mode} />
-                <span className="min-w-0 flex-1 truncate text-[12px]" title={a.name}>
-                  {a.name}
-                </span>
-                <span className="num shrink-0 text-[11px] text-ink/55 dark:text-bone/45">
-                  {a.codepoints.toLocaleString()}
-                </span>
-              </label>
-              {isDyn && a.sourceTtf && (
-                <p className="mt-0.5 ml-6 num text-[10.5px] text-ink/45 dark:text-bone/35">
-                  ← {a.sourceTtf}
-                  {typeof a.placeholdersFiltered === 'number' && a.placeholdersFiltered > 0 && (
-                    <span className="ml-2 text-vermillion/75 dark:text-amber/75">
-                      −{a.placeholdersFiltered.toLocaleString()} 空字形
-                    </span>
-                  )}
-                </p>
-              )}
-            </li>
-          );
-        })}
+        {assets.map((a) => (
+          <AssetRow
+            key={a.name}
+            asset={a}
+            checked={selected.has(a.name)}
+            onToggle={() => onToggle(a.name)}
+          />
+        ))}
       </ul>
+
+      {ttfTotal > 0 && (
+        <>
+          <div className="mt-5 flex items-baseline justify-between border-t border-ink/15 pt-3 dark:border-bone/10">
+            <p className="label text-ink/55 dark:text-bone/45">源 TTF 文件</p>
+            <p className="num text-[10.5px] text-ink/40 dark:text-bone/35">
+              默认不选 · 空字形已过滤
+            </p>
+          </div>
+          <ul className="space-y-1.5">
+            {ttfEntries.map((t) => (
+              <AssetRow
+                key={t.name}
+                asset={t}
+                checked={selected.has(t.name)}
+                onToggle={() => onToggle(t.name)}
+              />
+            ))}
+          </ul>
+        </>
+      )}
     </div>
+  );
+}
+
+function AssetRow({
+  asset,
+  checked,
+  onToggle,
+}: {
+  asset: FontAssetEntry;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  const isDyn = asset.mode === 'dynamic' || asset.mode === 'dynamic-os';
+  return (
+    <li>
+      <label
+        className={[
+          'flex items-center gap-2.5 border border-ink/15 px-2.5 py-1.5 cursor-pointer transition dark:border-bone/10',
+          checked
+            ? 'bg-ink/[0.04] dark:bg-bone/[0.04]'
+            : 'opacity-60 hover:opacity-100',
+        ].join(' ')}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className="h-3.5 w-3.5 accent-vermillion dark:accent-amber"
+        />
+        <ModeBadge mode={asset.mode} />
+        <span className="min-w-0 flex-1 truncate text-[12px]" title={asset.name}>
+          {asset.name}
+        </span>
+        <span className="num shrink-0 text-[11px] text-ink/55 dark:text-bone/45">
+          {asset.codepoints.toLocaleString()}
+        </span>
+      </label>
+      {isDyn && asset.sourceTtf && (
+        <p className="mt-0.5 ml-6 num text-[10.5px] text-ink/45 dark:text-bone/35">
+          ← {asset.sourceTtf}
+          {typeof asset.placeholdersFiltered === 'number' && asset.placeholdersFiltered > 0 && (
+            <span className="ml-2 text-vermillion/75 dark:text-amber/75">
+              −{asset.placeholdersFiltered.toLocaleString()} 空字形
+            </span>
+          )}
+        </p>
+      )}
+      {asset.mode === 'ttf' && typeof asset.placeholdersFiltered === 'number' && asset.placeholdersFiltered > 0 && (
+        <p className="mt-0.5 ml-6 num text-[10.5px] text-moss/80 dark:text-amber/55">
+          −{asset.placeholdersFiltered.toLocaleString()} 空字形已排除
+        </p>
+      )}
+    </li>
   );
 }
 
 function ModeBadge({ mode }: { mode: FontAssetMode }) {
   const short = modeShort(mode);
-  const isDyn = mode !== 'static';
+  const style =
+    mode === 'ttf'
+      ? 'border-moss text-moss dark:border-amber/80 dark:text-amber/80 border-dashed'
+      : mode === 'dynamic' || mode === 'dynamic-os'
+      ? 'border-vermillion text-vermillion dark:border-amber dark:text-amber'
+      : 'border-ink/50 text-ink/60 dark:border-bone/40 dark:text-bone/55';
   return (
     <span
       title={modeLabel(mode)}
       className={[
         'num inline-flex h-4 w-5 items-center justify-center border text-[9.5px] font-medium',
-        isDyn
-          ? 'border-vermillion text-vermillion dark:border-amber dark:text-amber'
-          : 'border-ink/50 text-ink/60 dark:border-bone/40 dark:text-bone/55',
+        style,
       ].join(' ')}
     >
       {short}
