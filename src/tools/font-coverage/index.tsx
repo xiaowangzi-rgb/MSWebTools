@@ -762,6 +762,7 @@ function AssetPicker({
         </AssetGroup>
         {staticAssets.length > 0 && (
           <AssetGroup
+            defaultOpen
             label="Static"
             total={staticAssets.length}
             selectedCount={countSelected(staticAssets)}
@@ -778,6 +779,7 @@ function AssetPicker({
         )}
         {dynamicAssets.length > 0 && (
           <AssetGroup
+            defaultOpen
             label="Dynamic"
             total={dynamicAssets.length}
             selectedCount={countSelected(dynamicAssets)}
@@ -794,6 +796,7 @@ function AssetPicker({
         )}
         {otherAssets.length > 0 && (
           <AssetGroup
+            defaultOpen
             label="其他"
             total={otherAssets.length}
             selectedCount={countSelected(otherAssets)}
