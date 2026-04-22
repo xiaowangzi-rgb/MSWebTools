@@ -204,8 +204,12 @@ export default function FontCoverageTool() {
       .then((d: Dataset) => {
         setDataset(d);
         setSelected((prev) => {
-          // Preserve any user-TTF selections made before the dataset loaded.
+          // Preserve any user-TTF selections made before the dataset loaded,
+          // plus default-select every Static FontAsset (project ships baked).
           const next = new Set(prev);
+          for (const a of d.fontAssets) {
+            if (a.mode === 'static') next.add(a.name);
+          }
           for (const t of deriveTtfEntries(d)) next.add(t.name);
           return next;
         });
@@ -733,7 +737,6 @@ function AssetPicker({
 
       <div className="border-t border-ink/15 pt-1 dark:border-bone/10">
         <AssetGroup
-          defaultOpen
           label="源 TTF 文件"
           hint="空字形已过滤"
           total={ttfTotal}
@@ -762,7 +765,6 @@ function AssetPicker({
         </AssetGroup>
         {staticAssets.length > 0 && (
           <AssetGroup
-            defaultOpen
             label="Static"
             total={staticAssets.length}
             selectedCount={countSelected(staticAssets)}
@@ -779,7 +781,6 @@ function AssetPicker({
         )}
         {dynamicAssets.length > 0 && (
           <AssetGroup
-            defaultOpen
             label="Dynamic"
             total={dynamicAssets.length}
             selectedCount={countSelected(dynamicAssets)}
@@ -796,7 +797,6 @@ function AssetPicker({
         )}
         {otherAssets.length > 0 && (
           <AssetGroup
-            defaultOpen
             label="其他"
             total={otherAssets.length}
             selectedCount={countSelected(otherAssets)}
